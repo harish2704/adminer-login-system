@@ -11,6 +11,9 @@ class Database
 	/** @var Logger */
 	private $logger;
 
+	/** @var string */
+	private $dbFile;
+
 	/**
 	 * @param string $dbFile
 	 * @param Logger $logger
@@ -20,6 +23,7 @@ class Database
 	{
 		$this->logger = $logger;
 		$this->logger->entry('Database::__construct', ['db_file' => $dbFile]);
+		$this->dbFile = $dbFile;
 
 		$dir = dirname($dbFile);
 		if (!is_dir($dir) && !@mkdir($dir, 0750, true)) {
@@ -30,8 +34,17 @@ class Database
 		$this->db->busyTimeout(5000);
 		$this->db->exec('PRAGMA foreign_keys = ON;');
 		$this->createSchema();
+		$this->dbFile = realpath($dbFile) ?: $dbFile;
 
 		$this->logger->exit_('Database::__construct');
+	}
+
+	/**
+	 * @return string
+	 */
+	public function getDbFile(): string
+	{
+		return $this->dbFile;
 	}
 
 	/**

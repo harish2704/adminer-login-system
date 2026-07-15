@@ -37,14 +37,16 @@ class SshTunnel
 		$existingPid = $server['ssh_pid'] ? (int) $server['ssh_pid'] : null;
 
 		if ($existingPid !== null) {
-			if ($this->isProcessAlive($existingPid)) {
+			$alivePid = $this->findTunnelPid($remoteHost, $remotePort);
+			if ($alivePid === $existingPid) {
 				$localPort = $server['mapped_local_port'] ? (int) $server['mapped_local_port'] : null;
 				if ($localPort !== null) {
-					$this->logger->exit_('SshTunnel::ensureTunnel', ['reused' => true, 'local_port' => $localPort]);
+					$this->logger->exit_('SshTunnel::ensureTunnel', ['reused' => true, 'local_port' => $localPort, 'pid' => $existingPid]);
 					return array_merge($server, ['mapped_local_port' => $localPort]);
 				}
 			}
 
+			$this->logger->log('Stale tunnel detected, clearing', ['server_id' => $server['id'], 'stored_pid' => $existingPid, 'alive_pid' => $alivePid], 'warning');
 			$this->killProcess($existingPid);
 			$this->serverManager->updateTunnel((int) $server['id'], null, null);
 		}
@@ -82,7 +84,7 @@ class SshTunnel
 		$sshPassword = $server['ssh_password'];
 
 		$hostSpec = $sshUser ? $sshUser . '@' . $sshHost : $sshHost;
-		$options = '-o BatchMode=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes';
+		$options = '-o BatchMode=no -o ExitOnForwardFailure=yes';
 
 		if ($keyPath !== null) {
 			$options .= ' -i ' . $keyPath;
@@ -120,6 +122,42 @@ class SshTunnel
 		$pid = (int) $output[0];
 		$this->logger->exit_('SshTunnel::spawn', ['pid' => $pid]);
 		return $pid;
+	}
+
+	/**
+	 * @param string $remoteHost
+	 * @param int $remotePort
+	 * @return int|null
+	 */
+	public function findTunnelPid(string $remoteHost, int $remotePort): ?int
+	{
+		$this->logger->entry('SshTunnel::findTunnelPid', ['remote_host' => $remoteHost, 'remote_port' => $remotePort]);
+		$pattern = "{$remoteHost}:{$remotePort}";
+
+		$proc = proc_open(['pgrep', '-f', $pattern], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+		if (!is_resource($proc)) {
+			$this->logger->exit_('SshTunnel::findTunnelPid', ['found' => false, 'reason' => 'proc_open failed']);
+			return null;
+		}
+
+		$output = stream_get_contents($pipes[1]);
+		fclose($pipes[1]);
+		fclose($pipes[2]);
+		proc_close($proc);
+
+		$pids = array_filter(array_map('trim', explode("\n", $output)), 'ctype_digit');
+
+		foreach ($pids as $pid) {
+			$pid = (int) $pid;
+			$cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+			if ($cmdline !== false && strpos($cmdline, 'ssh') !== false) {
+				$this->logger->exit_('SshTunnel::findTunnelPid', ['found' => true, 'pid' => $pid]);
+				return $pid;
+			}
+		}
+
+		$this->logger->exit_('SshTunnel::findTunnelPid', ['found' => false, 'candidates' => count($pids)]);
+		return null;
 	}
 
 	/**

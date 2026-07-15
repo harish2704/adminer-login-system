@@ -61,8 +61,80 @@ class AdminerLoginSystem extends Plugin
 		$this->serverManager = new \ServerManager($this->database, $this->crypto, $this->logger);
 		$this->sshTunnel = new \SshTunnel($this->serverManager, $this->logger);
 
+		$this->handleVaultLogin();
 		$this->handleLogout();
+
+		if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+			$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : 0;
+			$hasServer = !empty($_SESSION["adminer_login_system_server"]);
+			if ($userId && !$hasServer && !isset($_GET["login-system"])) {
+				$user = $this->authenticator->getUserById((int) $userId);
+				$action = ($user && empty($user['totp_secret'])) ? 'enroll-totp' : 'select-server';
+				$this->logger->log('Redirecting to login-system page', ['action' => $action, 'userId' => $userId]);
+				$uri = $_SERVER["REQUEST_URI"];
+				$sep = (strpos($uri, '?') === false) ? '?' : '&';
+				redirect($uri . $sep . 'login-system=' . urlencode($action));
+			}
+		}
+
 		$this->logger->exit_('AdminerLoginSystem::__construct');
+	}
+
+	/**
+	 * @return void
+	 */
+	private function handleVaultLogin(): void
+	{
+		if ($_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_POST["auth"]["login_system"])) {
+			return;
+		}
+
+		$this->logger->entry('AdminerLoginSystem::handleVaultLogin');
+
+		$username = isset($_POST["auth"]["username"]) ? (string) $_POST["auth"]["username"] : '';
+		$password = isset($_POST["auth"]["password"]) ? (string) $_POST["auth"]["password"] : '';
+		$otp = isset($_POST["auth"]["otp"]) ? (string) $_POST["auth"]["otp"] : '';
+
+		$user = $this->authenticator->authenticate($username, $password, $otp);
+
+		if ($user === null) {
+			$this->logger->log('Vault login rejected', ['username' => $username], 'warning');
+			$_SESSION["adminer_login_system_error"] = 'Invalid vault username, password, or TOTP code.';
+			redirect('?username=' . urlencode($username));
+		}
+
+		$_SESSION["adminer_login_system_user_id"] = (int) $user['id'];
+		$_SESSION["adminer_login_system_username"] = $user['username'];
+		$_SESSION["token"] = rand(1, 1e6);
+		$this->logger->log('Vault login accepted', ['user_id' => $user['id'], 'username' => $username]);
+
+		// Satisfy Adminer's requirement for a database connection by routing through
+		// a lightweight SQLite state database in the current working directory.
+		$stateDb = $this->ensureStateDb();
+		$_POST["auth"]["driver"] = 'sqlite';
+		$_POST["auth"]["server"] = $stateDb;
+		$_POST["auth"]["db"] = '';
+
+		$this->logger->exit_('AdminerLoginSystem::handleVaultLogin');
+	}
+
+	/**
+	 * @return string
+	 */
+	private function ensureStateDb(): string
+	{
+		$filename = 'adminer-login-system-state.db';
+		$path = getcwd() . '/' . $filename;
+
+		if (!file_exists($path)) {
+			@$tmp = new \SQLite3($path);
+			if ($tmp) {
+				@$tmp->exec('CREATE TABLE IF NOT EXISTS _adminer_login_system_state (x INTEGER)');
+				$tmp->close();
+			}
+		}
+
+		return $filename;
 	}
 
 	/**
@@ -76,7 +148,13 @@ class AdminerLoginSystem extends Plugin
 		$this->logger->entry('AdminerLoginSystem::loginFormField', ['name' => $name]);
 
 		$result = $heading . $value;
-		if ($name === 'password') {
+
+		if ($name === 'driver') {
+			if (!empty($_SESSION["adminer_login_system_error"])) {
+				$result = '<tr><td colspan=2><p class="error">' . h($_SESSION["adminer_login_system_error"]) . '</p></td></tr>' . "\n" . $result;
+				unset($_SESSION["adminer_login_system_error"]);
+			}
+		} elseif ($name === 'password') {
 			$result .= "<tr><th>TOTP code<td><input name=\"auth[otp]\" value=\"\" autocomplete=\"off\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\"></tr>\n";
 			$result .= "<input type=\"hidden\" name=\"auth[login_system]\" value=\"1\">\n";
 		}
@@ -88,38 +166,23 @@ class AdminerLoginSystem extends Plugin
 	/**
 	 * @param string $login
 	 * @param string $password
-	 * @return string|true
+	 * @return mixed
 	 */
 	function login($login, $password)
 	{
 		$this->logger->entry('AdminerLoginSystem::login', ['login' => $login]);
 
-		if (empty($_POST["auth"]["login_system"])) {
-			$this->logger->exit_('AdminerLoginSystem::login', ['handled' => false]);
+		if (!empty($_SESSION["adminer_login_system_user_id"])) {
+			$this->logger->exit_('AdminerLoginSystem::login', ['result' => 'vault session active']);
 			return true;
 		}
 
-		$otp = isset($_POST["auth"]["otp"]) ? (string) $_POST["auth"]["otp"] : '';
-		$user = $this->authenticator->authenticate($login, $password, $otp);
-
-		if ($user === null) {
-			$this->logger->log('Login rejected', ['login' => $login], 'warning');
-			$this->logger->exit_('AdminerLoginSystem::login', ['result' => 'invalid credentials']);
-			return 'Invalid vault username, password, or TOTP code.';
-		}
-
-		$_SESSION["adminer_login_system_user_id"] = (int) $user['id'];
-		$_SESSION["adminer_login_system_username"] = $user['username'];
-
-		if (empty($user['totp_secret'])) {
-			redirect("?login-system=enroll-totp");
-		}
-
-		redirect("?login-system=select-server");
+		$this->logger->exit_('AdminerLoginSystem::login', ['handled' => false]);
+		return null;
 	}
 
 	/**
-	 * @return array
+	 * @return array|null
 	 */
 	function credentials()
 	{
@@ -131,8 +194,14 @@ class AdminerLoginSystem extends Plugin
 			return [$server['host'], $server['db_username'], $server['db_password']];
 		}
 
+		if (!empty($_SESSION["adminer_login_system_user_id"])) {
+			$stateDb = $this->ensureStateDb();
+			$this->logger->exit_('AdminerLoginSystem::credentials', ['state_db' => $stateDb]);
+			return [$stateDb, '', ''];
+		}
+
 		$this->logger->exit_('AdminerLoginSystem::credentials', ['default' => true]);
-		return [SERVER, $_GET["username"], get_password()];
+		return null;
 	}
 
 	/**
@@ -140,31 +209,67 @@ class AdminerLoginSystem extends Plugin
 	 */
 	function headers()
 	{
-		$this->logger->entry('AdminerLoginSystem::headers');
-
-		if (empty($_GET["login-system"])) {
-			$this->logger->exit_('AdminerLoginSystem::headers', ['handled' => false]);
+		$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : 0;
+		$hasServer = !empty($_SESSION["adminer_login_system_server"]);
+		if (!$userId || $hasServer) {
 			return;
 		}
 
-		if (!verify_token()) {
-			$this->logger->log('CSRF token verification failed', [], 'error');
-			redirect('');
+		$action = isset($_GET["login-system"]) ? $_GET["login-system"] : '';
+		if (!$action) {
+			return;
 		}
 
-		$action = $_GET["login-system"];
-		page_header($action === 'select-server' ? 'Select database server' : 'Enroll TOTP');
+		$this->logger->entry('AdminerLoginSystem::headers (rendering)');
 
-		if ($action === 'enroll-totp') {
+		// Output minimal HTML page with custom content
+		// HTTP headers already sent by page_headers(), just output HTML
+		?>
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title><?php echo h($action === 'enroll-totp' ? 'Enroll TOTP' : 'Select server'); ?> - Adminer</title>
+<link rel="stylesheet" href="../adminer/static/default.css">
+<link rel='stylesheet' media='(prefers-color-scheme: dark)' href='../adminer/static/dark.css'>
+<body class="ltr">
+<div id="content">
+<?php
+		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !verify_token()) {
+			echo '<p class="error">Invalid CSRF token.</p>';
+		} elseif ($action === 'enroll-totp') {
 			$this->renderEnrollTotp();
 		} elseif ($action === 'select-server') {
 			$this->renderSelectServer();
 		} else {
 			echo '<p class="error">Unknown login system action.</p>';
 		}
-
-		page_footer();
+?>
+</div>
+</body>
+</html>
+<?php
+		$this->logger->exit_('AdminerLoginSystem::headers (rendering)');
 		exit;
+	}
+
+	/**
+	 * @return bool
+	 */
+	function homepage(): bool
+	{
+		$this->logger->entry('AdminerLoginSystem::homepage');
+		if (!empty($_SESSION["adminer_login_system_server"])) {
+			$this->logger->exit_('AdminerLoginSystem::homepage', ['handled' => false, 'reason' => 'real_server_selected']);
+			return true;
+		}
+		if (!empty($_SESSION["adminer_login_system_user_id"])) {
+			$this->logger->exit_('AdminerLoginSystem::homepage', ['handled' => true, 'reason' => 'vault_no_server']);
+			return false;
+		}
+		$this->logger->exit_('AdminerLoginSystem::homepage', ['handled' => false, 'reason' => 'no_vault']);
+		return true;
 	}
 
 	/**
@@ -178,7 +283,7 @@ class AdminerLoginSystem extends Plugin
 		$user = $this->authenticator->getUserById($userId);
 
 		if ($user && !empty($user['totp_secret']) && !empty($user['enrolled_at'])) {
-			redirect("?login-system=select-server");
+			redirect(ME . 'login-system=select-server');
 		}
 
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['totp_secret']) && !empty($_POST['totp_code'])) {
@@ -188,7 +293,7 @@ class AdminerLoginSystem extends Plugin
 			if ($this->totp->verify($secret, $code)) {
 				$this->authenticator->enrollTotp($userId, $secret);
 				$this->logger->log('TOTP enrolled', ['user_id' => $userId]);
-				redirect("?login-system=select-server");
+				redirect(ME . 'login-system=select-server');
 			} else {
 				echo '<p class="error">Invalid verification code.</p>';
 			}
@@ -286,14 +391,15 @@ class AdminerLoginSystem extends Plugin
 		}
 
 		$serverHost = $hostname . ':' . $port;
+		session_start();
 		set_password($vendor, $serverHost, $credentials['db_username'], $credentials['db_password']);
-
 		$_SESSION["adminer_login_system_server"] = [
 			'id' => $server['id'],
 			'host' => $serverHost,
 			'db_username' => $credentials['db_username'],
 			'db_password' => $credentials['db_password'],
 		];
+		session_write_close();
 
 		$this->logger->log('Server selected', ['server_id' => $server['id'], 'host' => $serverHost]);
 		redirect(auth_url($vendor, $serverHost, $credentials['db_username'], ''));
@@ -306,7 +412,7 @@ class AdminerLoginSystem extends Plugin
 	{
 		$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : 0;
 		if (!$userId) {
-			redirect('');
+			redirect(ME);
 		}
 		return (int) $userId;
 	}
@@ -320,12 +426,14 @@ class AdminerLoginSystem extends Plugin
 
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['logout']) && verify_token()) {
 			$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : null;
+			$serverId = isset($_SESSION["adminer_login_system_server"]['id']) ? $_SESSION["adminer_login_system_server"]['id'] : null;
 
 			if ($userId !== null) {
-				foreach ($this->serverManager->listActiveTunnels() as $tunnel) {
-					if (!empty($tunnel['ssh_pid'])) {
-						$this->sshTunnel->killProcess((int) $tunnel['ssh_pid']);
-						$this->serverManager->updateTunnel((int) $tunnel['id'], null, null);
+				if ($serverId !== null) {
+					$server = $this->serverManager->getServerForUser((int) $serverId, (int) $userId);
+					if ($server !== null && !empty($server['ssh_pid'])) {
+						$this->sshTunnel->killProcess((int) $server['ssh_pid']);
+						$this->serverManager->updateTunnel((int) $server['id'], null, null);
 					}
 				}
 				unset($_SESSION["adminer_login_system_user_id"]);

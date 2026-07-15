@@ -22,7 +22,7 @@ A vault-based authentication and server selection plugin for [Adminer](https://w
 require_once __DIR__ . '/externals/adminer-login-system/adminer-login-system.php';
 
 return [
-	new AdminerLoginSystem(
+	new Adminer\AdminerLoginSystem(
 		__DIR__ . '/externals/adminer-login-system/login-vault.db',
 		'your-random-master-key',
 		true,
@@ -38,6 +38,32 @@ php externals/adminer-login-system/bin/seed.php
 ```
 
 4. Open Adminer and log in with the vault username, vault password, and TOTP code.
+
+## Adding servers and access
+
+Servers and user-to-server access mappings are managed manually (web UI is planned for later). Insert rows directly into the SQLite vault, e.g. with `sqlite3 login-vault.db`:
+
+```sql
+-- public MySQL server
+INSERT INTO servers (name, hostname, port, db_type, db_username, db_password, is_public)
+VALUES ('Production MySQL', 'db.example.com', 3306, 'mysql', 'dbuser', 'ENCRYPTED_PASSWORD', 1);
+
+-- private PostgreSQL server reached through a bastion
+INSERT INTO servers (name, hostname, port, db_type, db_username, db_password, is_public, ssh_host, ssh_port, ssh_user, ssh_private_key_path)
+VALUES ('Private Postgres', 'pg.internal', 5432, 'pgsql', 'dbuser', 'ENCRYPTED_PASSWORD', 0, 'bastion.example.com', 22, 'sshuser', '/path/to/id_rsa');
+
+-- grant the admin user access to both servers
+INSERT INTO user_servers (user_id, server_id) VALUES (1, 1), (1, 2);
+```
+
+`db_password` must be the value produced by `Crypto::encrypt()` using your master key. For a one-off encryption you can use a small PHP snippet:
+
+```php
+require_once 'src/Logger.php';
+require_once 'src/Crypto.php';
+$crypto = new Crypto('your-master-key', new Logger(false, ''));
+echo $crypto->encrypt('plain-db-password');
+```
 
 ## CLI Tools
 
