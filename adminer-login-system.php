@@ -99,7 +99,7 @@ class AdminerLoginSystem extends Plugin
 			return true;
 		}
 
-		$otp = $_POST["auth"]["otp"] ?? '';
+		$otp = isset($_POST["auth"]["otp"]) ? (string) $_POST["auth"]["otp"] : '';
 		$user = $this->authenticator->authenticate($login, $password, $otp);
 
 		if ($user === null) {
@@ -195,7 +195,7 @@ class AdminerLoginSystem extends Plugin
 		}
 
 		$secret = $this->totp->generateSecret();
-		$username = $_SESSION["adminer_login_system_username"] ?? 'user';
+		$username = isset($_SESSION["adminer_login_system_username"]) ? $_SESSION["adminer_login_system_username"] : 'user';
 		$issuer = 'Adminer';
 		$label = $issuer . ':' . $username;
 		$otpauth = 'otpauth://totp/' . rawurlencode($label) . '?secret=' . rawurlencode($secret) . '&issuer=' . rawurlencode($issuer);
@@ -304,7 +304,7 @@ class AdminerLoginSystem extends Plugin
 	 */
 	private function requireUser(): int
 	{
-		$userId = $_SESSION["adminer_login_system_user_id"] ?? 0;
+		$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : 0;
 		if (!$userId) {
 			redirect('');
 		}
@@ -319,7 +319,7 @@ class AdminerLoginSystem extends Plugin
 		$this->logger->entry('AdminerLoginSystem::handleLogout');
 
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['logout']) && verify_token()) {
-			$userId = $_SESSION["adminer_login_system_user_id"] ?? null;
+			$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : null;
 
 			if ($userId !== null) {
 				foreach ($this->serverManager->listActiveTunnels() as $tunnel) {

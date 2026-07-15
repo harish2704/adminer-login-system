@@ -42,7 +42,7 @@ class Database
 		$this->logger->entry('Database::createSchema');
 
 		$this->db->exec('CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id INTEGER PRIMARY KEY,
 			username TEXT UNIQUE NOT NULL,
 			password_hash TEXT NOT NULL,
 			totp_secret TEXT,
@@ -51,7 +51,7 @@ class Database
 		);');
 
 		$this->db->exec('CREATE TABLE IF NOT EXISTS servers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id INTEGER PRIMARY KEY,
 			name TEXT,
 			hostname TEXT NOT NULL,
 			port INTEGER NOT NULL,
@@ -70,7 +70,7 @@ class Database
 		);');
 
 		$this->db->exec('CREATE TABLE IF NOT EXISTS user_servers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id INTEGER PRIMARY KEY,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
 			UNIQUE(user_id, server_id)
