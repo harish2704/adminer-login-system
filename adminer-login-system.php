@@ -75,14 +75,14 @@ class AdminerLoginSystem extends Plugin
 	{
 		$this->logger->entry('AdminerLoginSystem::loginFormField', ['name' => $name]);
 
+		$result = $heading . $value;
 		if ($name === 'password') {
-			$value .= "<tr><th>Vault password</th><td>" . $heading . "</td></tr>\n";
-			$value .= "<tr><th>TOTP code</th><td><input name=\"auth[otp]\" value=\"\" autocomplete=\"off\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\"></td></tr>\n";
-			$value .= "<input type=\"hidden\" name=\"auth[login_system]\" value=\"1\">\n";
+			$result .= "<tr><th>TOTP code<td><input name=\"auth[otp]\" value=\"\" autocomplete=\"off\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\"></tr>\n";
+			$result .= "<input type=\"hidden\" name=\"auth[login_system]\" value=\"1\">\n";
 		}
 
 		$this->logger->exit_('AdminerLoginSystem::loginFormField');
-		return $value;
+		return $result;
 	}
 
 	/**

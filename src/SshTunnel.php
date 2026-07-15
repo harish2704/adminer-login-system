@@ -110,21 +110,14 @@ class SshTunnel
 	{
 		$this->logger->entry('SshTunnel::spawn', ['cmd' => $cmd]);
 
-		$descriptors = [
-			0 => ['file', '/dev/null', 'r'],
-			1 => ['file', '/dev/null', 'w'],
-			2 => ['file', '/dev/null', 'w'],
-		];
-		$process = proc_open($cmd, $descriptors, $pipes);
+		$full = "nohup {$cmd} > /dev/null 2>&1 & echo $!";
+		exec($full, $output, $exitCode);
 
-		if (!is_resource($process)) {
+		if ($exitCode !== 0 || empty($output[0]) || !ctype_digit($output[0])) {
 			throw new RuntimeException('Failed to spawn SSH tunnel');
 		}
 
-		$status = proc_get_status($process);
-		proc_close($process);
-		$pid = (int) $status['pid'];
-
+		$pid = (int) $output[0];
 		$this->logger->exit_('SshTunnel::spawn', ['pid' => $pid]);
 		return $pid;
 	}
