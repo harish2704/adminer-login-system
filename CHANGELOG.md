@@ -2,7 +2,20 @@
 
 ## [Unreleased]
 
-- Initial public release.
+### Added
+
+- **Step-by-step login flow**: login is now split into four sequential steps: (1) username + password, (2) TOTP verification, (3) server selection, (4) connect. TOTP is no longer embedded in the Adminer login form.
+- **`verify-totp` page**: standalone TOTP verification page between password auth and server selection, shown when a user has TOTP enrolled.
+- **`authenticateUsernamePassword()`**: password-only validation method in Authenticator, separate from the combined password+TOTP `authenticate()` method.
+- **`adminer_login_system_totp_verified` session flag**: tracks whether TOTP has been verified in the current session, preventing bypass of step 2.
+
+### Changed
+
+- **Login form**: removed TOTP code field from the Adminer login form (`loginFormField()` hook). The form now matches the standard Adminer login appearance.
+- **`handleVaultLogin()`**: validates username + password only (via `authenticateUsernamePassword()`), then redirects to `verify-totp` (if enrolled) or `enroll-totp` (if not). No longer completes Adminer login or sets `$_POST` for state DB.
+- **Constructor GET redirect**: respects `adminer_login_system_totp_verified` flag — redirects to `verify-totp` when TOTP is enrolled but not yet verified.
+- **`renderEnrollTotp()`**: sets `totp_verified = true` after successful enrollment before redirecting to server selection.
+- **Logout**: clears `adminer_login_system_totp_verified` session flag.
 
 ## 0.2.0 — 2026-07-15
 

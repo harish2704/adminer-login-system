@@ -79,7 +79,13 @@ class AdminerLoginSystem extends Plugin
 			$hasServer = !empty($_SESSION["adminer_login_system_server"]);
 			if ($userId && !$hasServer && !isset($_GET["login-system"])) {
 				$user = $this->authenticator->getUserById((int) $userId);
-				$action = ($user && empty($user['totp_secret'])) ? 'enroll-totp' : 'select-server';
+				if ($user && empty($user['totp_secret'])) {
+					$action = 'enroll-totp';
+				} elseif (empty($_SESSION["adminer_login_system_totp_verified"])) {
+					$action = 'verify-totp';
+				} else {
+					$action = 'select-server';
+				}
 				$this->logger->log('Redirecting to login-system page', ['action' => $action, 'userId' => $userId]);
 				$uri = $_SERVER["REQUEST_URI"];
 				$sep = (strpos($uri, '?') === false) ? '?' : '&';
@@ -103,13 +109,12 @@ class AdminerLoginSystem extends Plugin
 
 		$username = isset($_POST["auth"]["username"]) ? (string) $_POST["auth"]["username"] : '';
 		$password = isset($_POST["auth"]["password"]) ? (string) $_POST["auth"]["password"] : '';
-		$otp = isset($_POST["auth"]["otp"]) ? (string) $_POST["auth"]["otp"] : '';
 
-		$user = $this->authenticator->authenticate($username, $password, $otp);
+		$user = $this->authenticator->authenticateUsernamePassword($username, $password);
 
 		if ($user === null) {
 			$this->logger->log('Vault login rejected', ['username' => $username], 'warning');
-			$_SESSION["adminer_login_system_error"] = 'Invalid vault username, password, or TOTP code.';
+			$_SESSION["adminer_login_system_error"] = 'Invalid vault username or password.';
 			redirect('?username=' . urlencode($username));
 		}
 
@@ -119,14 +124,14 @@ class AdminerLoginSystem extends Plugin
 		$_SESSION["token"] = rand(1, 1e6);
 		$this->logger->log('Vault login accepted', ['user_id' => $user['id'], 'username' => $username]);
 
-		// Satisfy Adminer's requirement for a database connection by routing through
-		// a lightweight SQLite state database in the current working directory.
-		$stateDb = $this->ensureStateDb();
-		$_POST["auth"]["driver"] = 'sqlite';
-		$_POST["auth"]["server"] = $stateDb;
-		$_POST["auth"]["db"] = '';
-
-		$this->logger->exit_('AdminerLoginSystem::handleVaultLogin');
+		// Redirect to TOTP or enrollment page (use ? not ME since ME is not defined in constructor)
+		if (!empty($user['totp_secret'])) {
+			$this->logger->exit_('AdminerLoginSystem::handleVaultLogin', ['redirect' => 'verify-totp']);
+			redirect('?login-system=verify-totp');
+		} else {
+			$this->logger->exit_('AdminerLoginSystem::handleVaultLogin', ['redirect' => 'enroll-totp']);
+			redirect('?login-system=enroll-totp');
+		}
 	}
 
 	/**
@@ -166,7 +171,6 @@ class AdminerLoginSystem extends Plugin
 				unset($_SESSION["adminer_login_system_error"]);
 			}
 		} elseif ($name === 'password') {
-			$result .= "<tr><th>TOTP code<td><input name=\"auth[otp]\" value=\"\" autocomplete=\"off\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\"></tr>\n";
 			$result .= "<input type=\"hidden\" name=\"auth[login_system]\" value=\"1\">\n";
 		}
 
@@ -223,7 +227,7 @@ class AdminerLoginSystem extends Plugin
 		// Admin pages for super admins (renders standalone HTML with Adminer CSS)
 		if ($this->isSuperAdmin() && isset($_GET["login-system-admin"])) {
 			$this->logger->entry('AdminerLoginSystem::headers (admin page)');
-			$page = isset($_GET["login-system-admin-page"]) ? $_GET["login-system-admin-page"] : 'dashboard';
+			$page = isset($_GET["page"]) ? $_GET["page"] : 'dashboard';
 
 			if ($_SERVER['REQUEST_METHOD'] === 'POST' && !verify_token()) {
 				$pageTitle = 'Error';
@@ -259,7 +263,7 @@ class AdminerLoginSystem extends Plugin
 <link rel='stylesheet' media='(prefers-color-scheme: dark)' href='../adminer/static/dark.css'>
 <body class="ltr">
 <div id="content">
-<p class="links"><a href="<?php echo h(substr(\ME, 0, -1)); ?>">« Back to Adminer</a></p>
+<p class="links"><a href="<?php echo h(substr(ME, 0, -1)); ?>">« Back to Adminer</a></p>
 <h2><?php echo h($pageTitle); ?></h2>
 <?php
 			if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -297,14 +301,19 @@ class AdminerLoginSystem extends Plugin
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <meta name="robots" content="noindex">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title><?php echo h($action === 'enroll-totp' ? 'Enroll TOTP' : 'Select server'); ?> - Adminer</title>
+<title><?php echo h($action === 'verify-totp' ? 'Verify TOTP' : ($action === 'enroll-totp' ? 'Enroll TOTP' : 'Select server')); ?> - Adminer</title>
 <link rel="stylesheet" href="../adminer/static/default.css">
 <link rel='stylesheet' media='(prefers-color-scheme: dark)' href='../adminer/static/dark.css'>
 <body class="ltr">
 <div id="content">
+<?php if ($this->isSuperAdmin()) { ?>
+<p class="links"><a href="?login-system-admin=">Admin</a></p>
+<?php } ?>
 <?php
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !verify_token()) {
 			echo '<p class="error">Invalid CSRF token.</p>';
+		} elseif ($action === 'verify-totp') {
+			$this->renderVerifyTotp();
 		} elseif ($action === 'enroll-totp') {
 			$this->renderEnrollTotp();
 		} elseif ($action === 'select-server') {
@@ -342,6 +351,42 @@ class AdminerLoginSystem extends Plugin
 	/**
 	 * @return void
 	 */
+	private function renderVerifyTotp(): void
+	{
+		$this->logger->entry('AdminerLoginSystem::renderVerifyTotp');
+
+		$userId = $this->requireUser();
+		$user = $this->authenticator->getUserById($userId);
+
+		if ($user === null || empty($user['totp_secret'])) {
+			redirect(ME . 'login-system=enroll-totp');
+		}
+
+		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['totp_code'])) {
+			$code = $_POST['totp_code'];
+			if ($this->totp->verify($user['totp_secret'], $code)) {
+				$_SESSION["adminer_login_system_totp_verified"] = true;
+				$this->logger->log('TOTP verified', ['user_id' => $userId]);
+				redirect('?login-system=select-server');
+			} else {
+				echo '<p class="error">Invalid TOTP code.</p>';
+			}
+		}
+
+		echo '<h2>Two-factor authentication</h2>';
+		echo '<p>Enter the 6-digit code from your authenticator app.</p>';
+		echo '<form action="" method="post">';
+		echo input_token();
+		echo '<p><label>Verification code: <input name="totp_code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autofocus></label></p>';
+		echo '<p><input type="submit" value="Verify"></p>';
+		echo '</form>';
+
+		$this->logger->exit_('AdminerLoginSystem::renderVerifyTotp');
+	}
+
+	/**
+	 * @return void
+	 */
 	private function renderEnrollTotp(): void
 	{
 		$this->logger->entry('AdminerLoginSystem::renderEnrollTotp');
@@ -350,7 +395,7 @@ class AdminerLoginSystem extends Plugin
 		$user = $this->authenticator->getUserById($userId);
 
 		if ($user && !empty($user['totp_secret']) && !empty($user['enrolled_at'])) {
-			redirect(ME . 'login-system=select-server');
+			redirect('?login-system=select-server');
 		}
 
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['totp_secret']) && !empty($_POST['totp_code'])) {
@@ -359,8 +404,9 @@ class AdminerLoginSystem extends Plugin
 
 			if ($this->totp->verify($secret, $code)) {
 				$this->authenticator->enrollTotp($userId, $secret);
+				$_SESSION["adminer_login_system_totp_verified"] = true;
 				$this->logger->log('TOTP enrolled', ['user_id' => $userId]);
-				redirect(ME . 'login-system=select-server');
+				redirect('?login-system=select-server');
 			} else {
 				echo '<p class="error">Invalid verification code.</p>';
 			}
@@ -500,7 +546,7 @@ class AdminerLoginSystem extends Plugin
 	function menuActions($actions, $missing)
 	{
 		if ($this->isSuperAdmin()) {
-			$link = preg_replace('~\b(db|ns|select|edit|create|table|sql|dump|schema|privileges|processlist|variables|status|user|call|foreign|view|event|procedure|sequence|type|check|trigger|indexes|database|scheme|script)=[^&]*&~', '', \ME);
+			$link = preg_replace('~\b(db|ns|select|edit|create|table|sql|dump|schema|privileges|processlist|variables|status|user|call|foreign|view|event|procedure|sequence|type|check|trigger|indexes|database|scheme|script)=[^&]*&~', '', ME);
 			$link .= 'login-system-admin=';
 			$actions[] = '<a href="' . h($link) . '"' . bold(isset($_GET["login-system-admin"])) . '>Admin</a>';
 		}
@@ -579,7 +625,7 @@ class AdminerLoginSystem extends Plugin
 			$errors = $this->adminManager->validateUser($data);
 			if (empty($errors)) {
 				$this->adminManager->createUser($data['username'], $data['password'], $data['role']);
-				redirect(\ME . 'login-system-admin&page=users', 'User created.');
+				redirect(ME . 'login-system-admin&page=users', 'User created.');
 			}
 			$this->adminErrors = $errors;
 			return;
@@ -588,7 +634,7 @@ class AdminerLoginSystem extends Plugin
 		if ($action === 'update') {
 			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
 			if (!$id) {
-				redirect(\ME . 'login-system-admin&page=users', 'Invalid user ID.');
+				redirect(ME . 'login-system-admin&page=users', 'Invalid user ID.');
 			}
 			$data = [
 				'username' => isset($_POST['username']) ? $_POST['username'] : '',
@@ -598,7 +644,7 @@ class AdminerLoginSystem extends Plugin
 			$errors = $this->adminManager->validateUser($data, $id);
 			if (empty($errors)) {
 				$this->adminManager->updateUser($id, $data);
-				redirect(\ME . 'login-system-admin&page=users', 'User updated.');
+				redirect(ME . 'login-system-admin&page=users', 'User updated.');
 			}
 			$this->adminErrors = $errors;
 			return;
@@ -607,13 +653,13 @@ class AdminerLoginSystem extends Plugin
 		if ($action === 'delete') {
 			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
 			if (!$id) {
-				redirect(\ME . 'login-system-admin&page=users', 'Invalid user ID.');
+				redirect(ME . 'login-system-admin&page=users', 'Invalid user ID.');
 			}
 			$deleted = $this->adminManager->deleteUser($id);
 			if ($deleted) {
-				redirect(\ME . 'login-system-admin&page=users', 'User deleted.');
+				redirect(ME . 'login-system-admin&page=users', 'User deleted.');
 			}
-			redirect(\ME . 'login-system-admin&page=users', 'Cannot delete the last admin user.');
+			redirect(ME . 'login-system-admin&page=users', 'Cannot delete the last admin user.');
 		}
 	}
 
@@ -642,7 +688,7 @@ class AdminerLoginSystem extends Plugin
 			$errors = $this->adminManager->validateServer($data);
 			if (empty($errors)) {
 				$this->adminManager->createServer($data);
-				redirect(\ME . 'login-system-admin&page=servers', 'Server created.');
+				redirect(ME . 'login-system-admin&page=servers', 'Server created.');
 			}
 			$this->adminErrors = $errors;
 			return;
@@ -651,7 +697,7 @@ class AdminerLoginSystem extends Plugin
 		if ($action === 'update') {
 			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
 			if (!$id) {
-				redirect(\ME . 'login-system-admin&page=servers', 'Invalid server ID.');
+				redirect(ME . 'login-system-admin&page=servers', 'Invalid server ID.');
 			}
 			$data = [
 				'name' => isset($_POST['name']) ? $_POST['name'] : '',
@@ -670,7 +716,7 @@ class AdminerLoginSystem extends Plugin
 			$errors = $this->adminManager->validateServer($data);
 			if (empty($errors)) {
 				$this->adminManager->updateServer($id, $data);
-				redirect(\ME . 'login-system-admin&page=servers', 'Server updated.');
+				redirect(ME . 'login-system-admin&page=servers', 'Server updated.');
 			}
 			$this->adminErrors = $errors;
 			return;
@@ -679,10 +725,10 @@ class AdminerLoginSystem extends Plugin
 		if ($action === 'delete') {
 			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
 			if (!$id) {
-				redirect(\ME . 'login-system-admin&page=servers', 'Invalid server ID.');
+				redirect(ME . 'login-system-admin&page=servers', 'Invalid server ID.');
 			}
 			$this->adminManager->deleteServer($id);
-			redirect(\ME . 'login-system-admin&page=servers', 'Server deleted.');
+			redirect(ME . 'login-system-admin&page=servers', 'Server deleted.');
 		}
 	}
 
@@ -717,7 +763,7 @@ class AdminerLoginSystem extends Plugin
 			$this->adminManager->setUserServers($uid, $selectedIds);
 		}
 
-		redirect(\ME . 'login-system-admin&page=access', 'Access permissions updated.');
+		redirect(ME . 'login-system-admin&page=access', 'Access permissions updated.');
 	}
 
 	// ---------------------------------------------------------------
@@ -737,15 +783,15 @@ class AdminerLoginSystem extends Plugin
 		echo '<h2>Admin Dashboard</h2>';
 		echo '<p>Welcome to the Adminer Login System administration panel.</p>';
 		echo '<div id="admin-stats" style="display:flex;gap:1em;margin:1em 0;">';
-		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($userCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=users">Users</a></div>';
-		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($serverCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=servers">Servers</a></div>';
-		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($accessCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=access">Access mappings</a></div>';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($userCount) . '</strong><br><a href="' . h(ME) . 'login-system-admin&page=users">Users</a></div>';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($serverCount) . '</strong><br><a href="' . h(ME) . 'login-system-admin&page=servers">Servers</a></div>';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($accessCount) . '</strong><br><a href="' . h(ME) . 'login-system-admin&page=access">Access mappings</a></div>';
 		echo '</div>';
 
 		echo '<h3>Quick links</h3>';
 		echo '<ul>';
-		echo '<li><a href="' . h(\ME) . 'login-system-admin&page=user_form">Add new user</a></li>';
-		echo '<li><a href="' . h(\ME) . 'login-system-admin&page=server_form">Add new server</a></li>';
+		echo '<li><a href="' . h(ME) . 'login-system-admin&page=user_form">Add new user</a></li>';
+		echo '<li><a href="' . h(ME) . 'login-system-admin&page=server_form">Add new server</a></li>';
 		echo '</ul>';
 	}
 
@@ -758,7 +804,7 @@ class AdminerLoginSystem extends Plugin
 		$currentUserId = isset($_SESSION["adminer_login_system_user_id"]) ? (int) $_SESSION["adminer_login_system_user_id"] : 0;
 
 		echo '<h2>Users</h2>';
-		echo '<p><a href="' . h(\ME) . 'login-system-admin&page=user_form" class="button">+ Add User</a></p>';
+		echo '<p><a href="' . h(ME) . 'login-system-admin&page=user_form" class="button">+ Add User</a></p>';
 
 		if (empty($users)) {
 			echo '<p>No users found.</p>';
@@ -771,14 +817,14 @@ class AdminerLoginSystem extends Plugin
 		foreach ($users as $user) {
 			$isSelf = (int) $user['id'] === $currentUserId;
 			$totpStatus = (!empty($user['totp_secret']) && !empty($user['enrolled_at'])) ? 'Yes' : 'No';
-			$editLink = h(\ME) . 'login-system-admin&page=user_form&id=' . $user['id'];
+			$editLink = h(ME) . 'login-system-admin&page=user_form&id=' . $user['id'];
 			echo '<tr>';
 			echo '<td>' . h($user['username']) . ($isSelf ? ' <em>(you)</em>' : '') . '</td>';
 			echo '<td>' . h($user['role']) . '</td>';
 			echo '<td>' . $totpStatus . '</td>';
 			echo '<td>' . ($user['created_at'] ? h(date('Y-m-d', (int) $user['created_at'])) : '') . '</td>';
 			echo '<td>';
-			echo '<form action="' . h(\ME) . 'login-system-admin&page=users" method="post" style="display:inline">';
+			echo '<form action="' . h(ME) . 'login-system-admin&page=users" method="post" style="display:inline">';
 			echo input_token();
 			echo '<input type="hidden" name="id" value="' . $user['id'] . '">';
 			echo '<a href="' . $editLink . '">Edit</a>';
@@ -815,7 +861,7 @@ class AdminerLoginSystem extends Plugin
 		}
 
 		$formPage = $isEdit ? 'user_form&id=' . $id : 'user_form';
-		echo '<form action="' . h(\ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
+		echo '<form action="' . h(ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
 		echo input_token();
 		echo '<input type="hidden" name="admin_action" value="' . $action . '">';
 		if ($isEdit) {
@@ -834,7 +880,7 @@ class AdminerLoginSystem extends Plugin
 		echo '</select>';
 		echo '</table>';
 		echo '<p><input type="submit" value="' . ($isEdit ? 'Save' : 'Create') . '">';
-		echo ' <a href="' . h(\ME) . 'login-system-admin&page=users">Cancel</a></p>';
+		echo ' <a href="' . h(ME) . 'login-system-admin&page=users">Cancel</a></p>';
 		echo '</form>';
 	}
 
@@ -846,7 +892,7 @@ class AdminerLoginSystem extends Plugin
 		$servers = $this->adminManager->listServers();
 
 		echo '<h2>Servers</h2>';
-		echo '<p><a href="' . h(\ME) . 'login-system-admin&page=server_form" class="button">+ Add Server</a></p>';
+		echo '<p><a href="' . h(ME) . 'login-system-admin&page=server_form" class="button">+ Add Server</a></p>';
 
 		if (empty($servers)) {
 			echo '<p>No servers found.</p>';
@@ -859,7 +905,7 @@ class AdminerLoginSystem extends Plugin
 		foreach ($servers as $server) {
 			$public = !empty($server['is_public']) ? 'Yes' : 'No';
 			$ssh = (!empty($server['ssh_host'])) ? 'Yes' : 'No';
-			$editLink = h(\ME) . 'login-system-admin&page=server_form&id=' . $server['id'];
+			$editLink = h(ME) . 'login-system-admin&page=server_form&id=' . $server['id'];
 			echo '<tr>';
 			echo '<td>' . h($server['name']) . '</td>';
 			echo '<td>' . h($server['db_type']) . '</td>';
@@ -868,7 +914,7 @@ class AdminerLoginSystem extends Plugin
 			echo '<td>' . $public . '</td>';
 			echo '<td>' . $ssh . '</td>';
 			echo '<td>';
-			echo '<form action="' . h(\ME) . 'login-system-admin&page=servers" method="post" style="display:inline">';
+			echo '<form action="' . h(ME) . 'login-system-admin&page=servers" method="post" style="display:inline">';
 			echo input_token();
 			echo '<input type="hidden" name="id" value="' . $server['id'] . '">';
 			echo '<a href="' . $editLink . '">Edit</a>';
@@ -905,7 +951,7 @@ class AdminerLoginSystem extends Plugin
 		}
 
 		$formPage = $isEdit ? 'server_form&id=' . $id : 'server_form';
-		echo '<form action="' . h(\ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
+		echo '<form action="' . h(ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
 		echo input_token();
 		echo '<input type="hidden" name="admin_action" value="' . $action . '">';
 		if ($isEdit) {
@@ -937,7 +983,7 @@ class AdminerLoginSystem extends Plugin
 		echo '<tr><th>SSH key path<td><input name="ssh_private_key_path" value="' . h($server['ssh_private_key_path'] ?? '') . '">';
 		echo '</table>';
 		echo '<p><input type="submit" value="' . ($isEdit ? 'Save' : 'Create') . '">';
-		echo ' <a href="' . h(\ME) . 'login-system-admin&page=servers">Cancel</a></p>';
+		echo ' <a href="' . h(ME) . 'login-system-admin&page=servers">Cancel</a></p>';
 		echo '</form>';
 	}
 
@@ -958,7 +1004,7 @@ class AdminerLoginSystem extends Plugin
 			return;
 		}
 
-		echo '<form action="' . h(\ME) . 'login-system-admin&page=access" method="post">';
+		echo '<form action="' . h(ME) . 'login-system-admin&page=access" method="post">';
 		echo input_token();
 
 		echo '<table cellspacing="0">';
@@ -1012,6 +1058,7 @@ class AdminerLoginSystem extends Plugin
 				unset($_SESSION["adminer_login_system_user_id"]);
 				unset($_SESSION["adminer_login_system_username"]);
 				unset($_SESSION["adminer_login_system_server"]);
+				unset($_SESSION["adminer_login_system_totp_verified"]);
 				$this->logger->log('User logged out', ['user_id' => $userId]);
 			}
 		}

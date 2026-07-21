@@ -31,6 +31,29 @@ class Authenticator
 	/**
 	 * @param string $username
 	 * @param string $password
+	 * @return array|null
+	 */
+	public function authenticateUsernamePassword(string $username, string $password): ?array
+	{
+		$this->logger->entry('Authenticator::authenticateUsernamePassword', ['username' => $username]);
+
+		$stmt = $this->database->prepare('SELECT id, username, password_hash, totp_secret, role FROM users WHERE username = :username');
+		$stmt->bindValue(':username', $username, SQLITE3_TEXT);
+		$result = $stmt->execute();
+		$user = $result->fetchArray(SQLITE3_ASSOC);
+
+		if (!$user || !password_verify($password, $user['password_hash'])) {
+			$this->logger->log('Password authentication failed: invalid username or password', ['username' => $username], 'warning');
+			return null;
+		}
+
+		$this->logger->exit_('Authenticator::authenticateUsernamePassword', ['username' => $username, 'user_id' => $user['id']]);
+		return $user;
+	}
+
+	/**
+	 * @param string $username
+	 * @param string $password
 	 * @param string $otp
 	 * @return array|null
 	 */
