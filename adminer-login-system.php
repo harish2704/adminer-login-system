@@ -8,6 +8,7 @@ require_once __DIR__ . '/src/Totp.php';
 require_once __DIR__ . '/src/Authenticator.php';
 require_once __DIR__ . '/src/ServerManager.php';
 require_once __DIR__ . '/src/SshTunnel.php';
+require_once __DIR__ . '/src/AdminManager.php';
 
 /**
  * Vault-based login system plugin for Adminer.
@@ -35,6 +36,12 @@ class AdminerLoginSystem extends Plugin
 	/** @var SshTunnel */
 	private $sshTunnel;
 
+	/** @var AdminManager */
+	private $adminManager;
+
+	/** @var array */
+	private $adminErrors = [];
+
 	/**
 	 * @param string $dbFile
 	 * @param string $masterKey
@@ -60,6 +67,9 @@ class AdminerLoginSystem extends Plugin
 		$this->authenticator = new \Authenticator($this->database, $this->totp, $this->logger);
 		$this->serverManager = new \ServerManager($this->database, $this->crypto, $this->logger);
 		$this->sshTunnel = new \SshTunnel($this->serverManager, $this->logger);
+
+		$currentUserId = isset($_SESSION["adminer_login_system_user_id"]) ? (int) $_SESSION["adminer_login_system_user_id"] : null;
+		$this->adminManager = new \AdminManager($this->database, $this->crypto, $this->logger, $this->authenticator, $this->serverManager, $this->sshTunnel, $currentUserId);
 
 		$this->handleVaultLogin();
 		$this->handleLogout();
@@ -105,6 +115,7 @@ class AdminerLoginSystem extends Plugin
 
 		$_SESSION["adminer_login_system_user_id"] = (int) $user['id'];
 		$_SESSION["adminer_login_system_username"] = $user['username'];
+		$_SESSION["adminer_login_system_role"] = $user['role'] ?? 'user';
 		$_SESSION["token"] = rand(1, 1e6);
 		$this->logger->log('Vault login accepted', ['user_id' => $user['id'], 'username' => $username]);
 
@@ -209,6 +220,62 @@ class AdminerLoginSystem extends Plugin
 	 */
 	function headers()
 	{
+		// Admin pages for super admins (renders standalone HTML with Adminer CSS)
+		if ($this->isSuperAdmin() && isset($_GET["login-system-admin"])) {
+			$this->logger->entry('AdminerLoginSystem::headers (admin page)');
+			$page = isset($_GET["login-system-admin-page"]) ? $_GET["login-system-admin-page"] : 'dashboard';
+
+			if ($_SERVER['REQUEST_METHOD'] === 'POST' && !verify_token()) {
+				$pageTitle = 'Error';
+				?>
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title><?php echo h($pageTitle); ?> - Adminer</title>
+<link rel="stylesheet" href="../adminer/static/default.css">
+<link rel='stylesheet' media='(prefers-color-scheme: dark)' href='../adminer/static/dark.css'>
+<body class="ltr">
+<div id="content">
+<p class="error">Invalid CSRF token.</p>
+</div>
+</body>
+</html>
+<?php
+				$this->logger->exit_('AdminerLoginSystem::headers (admin page)');
+				exit;
+			}
+
+			$pageTitle = 'Admin: ' . ucfirst(str_replace('_', ' ', $page));
+			?>
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title><?php echo h($pageTitle); ?> - Adminer</title>
+<link rel="stylesheet" href="../adminer/static/default.css">
+<link rel='stylesheet' media='(prefers-color-scheme: dark)' href='../adminer/static/dark.css'>
+<body class="ltr">
+<div id="content">
+<p class="links"><a href="<?php echo h(substr(\ME, 0, -1)); ?>">« Back to Adminer</a></p>
+<h2><?php echo h($pageTitle); ?></h2>
+<?php
+			if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+				$this->handleAdminPost($page);
+			}
+
+			$this->renderAdminPage($page);
+?>
+</div>
+</body>
+</html>
+<?php
+			$this->logger->exit_('AdminerLoginSystem::headers (admin page)');
+			exit;
+		}
+
 		$userId = isset($_SESSION["adminer_login_system_user_id"]) ? $_SESSION["adminer_login_system_user_id"] : 0;
 		$hasServer = !empty($_SESSION["adminer_login_system_server"]);
 		if (!$userId || $hasServer) {
@@ -416,6 +483,512 @@ class AdminerLoginSystem extends Plugin
 		}
 		return (int) $userId;
 	}
+
+	/**
+	 * @return bool
+	 */
+	private function isSuperAdmin(): bool
+	{
+		return !empty($_SESSION["adminer_login_system_role"]) && $_SESSION["adminer_login_system_role"] === 'admin';
+	}
+
+	/**
+	 * @param array $actions
+	 * @param string $missing
+	 * @return array
+	 */
+	function menuActions($actions, $missing)
+	{
+		if ($this->isSuperAdmin()) {
+			$link = preg_replace('~\b(db|ns|select|edit|create|table|sql|dump|schema|privileges|processlist|variables|status|user|call|foreign|view|event|procedure|sequence|type|check|trigger|indexes|database|scheme|script)=[^&]*&~', '', \ME);
+			$link .= 'login-system-admin=';
+			$actions[] = '<a href="' . h($link) . '"' . bold(isset($_GET["login-system-admin"])) . '>Admin</a>';
+		}
+		return $actions;
+	}
+
+	// ---------------------------------------------------------------
+	// Admin UI: dispatch
+	// ---------------------------------------------------------------
+
+	/**
+	 * @param string $page
+	 * @return void
+	 */
+	private function handleAdminPost(string $page): void
+	{
+		switch ($page) {
+			case 'users':
+			case 'user_form':
+				$this->handleAdminUserPost();
+				break;
+			case 'servers':
+			case 'server_form':
+				$this->handleAdminServerPost();
+				break;
+			case 'access':
+				$this->handleAdminAccessPost();
+				break;
+		}
+	}
+
+	/**
+	 * @param string $page
+	 * @return void
+	 */
+	private function renderAdminPage(string $page): void
+	{
+		switch ($page) {
+			case 'users':
+				$this->renderAdminUsersPage();
+				break;
+			case 'user_form':
+				$this->renderAdminUserForm(isset($_GET["id"]) ? (int) $_GET["id"] : null, []);
+				break;
+			case 'servers':
+				$this->renderAdminServersPage();
+				break;
+			case 'server_form':
+				$this->renderAdminServerForm(isset($_GET["id"]) ? (int) $_GET["id"] : null, []);
+				break;
+			case 'access':
+				$this->renderAdminAccessPage();
+				break;
+			default:
+				$this->renderAdminDashboardPage();
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Admin UI: POST handlers
+	// ---------------------------------------------------------------
+
+	/**
+	 * @return void
+	 */
+	private function handleAdminUserPost(): void
+	{
+		$action = isset($_POST['admin_action']) ? $_POST['admin_action'] : '';
+
+		if ($action === 'create') {
+			$data = [
+				'username' => isset($_POST['username']) ? $_POST['username'] : '',
+				'password' => isset($_POST['password']) ? $_POST['password'] : '',
+				'role' => isset($_POST['role']) ? $_POST['role'] : 'user',
+			];
+			$errors = $this->adminManager->validateUser($data);
+			if (empty($errors)) {
+				$this->adminManager->createUser($data['username'], $data['password'], $data['role']);
+				redirect(\ME . 'login-system-admin&page=users', 'User created.');
+			}
+			$this->adminErrors = $errors;
+			return;
+		}
+
+		if ($action === 'update') {
+			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+			if (!$id) {
+				redirect(\ME . 'login-system-admin&page=users', 'Invalid user ID.');
+			}
+			$data = [
+				'username' => isset($_POST['username']) ? $_POST['username'] : '',
+				'password' => isset($_POST['password']) ? $_POST['password'] : '',
+				'role' => isset($_POST['role']) ? $_POST['role'] : 'user',
+			];
+			$errors = $this->adminManager->validateUser($data, $id);
+			if (empty($errors)) {
+				$this->adminManager->updateUser($id, $data);
+				redirect(\ME . 'login-system-admin&page=users', 'User updated.');
+			}
+			$this->adminErrors = $errors;
+			return;
+		}
+
+		if ($action === 'delete') {
+			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+			if (!$id) {
+				redirect(\ME . 'login-system-admin&page=users', 'Invalid user ID.');
+			}
+			$deleted = $this->adminManager->deleteUser($id);
+			if ($deleted) {
+				redirect(\ME . 'login-system-admin&page=users', 'User deleted.');
+			}
+			redirect(\ME . 'login-system-admin&page=users', 'Cannot delete the last admin user.');
+		}
+	}
+
+	/**
+	 * @return void
+	 */
+	private function handleAdminServerPost(): void
+	{
+		$action = isset($_POST['admin_action']) ? $_POST['admin_action'] : '';
+
+		if ($action === 'create') {
+			$data = [
+				'name' => isset($_POST['name']) ? $_POST['name'] : '',
+				'hostname' => isset($_POST['hostname']) ? $_POST['hostname'] : '',
+				'port' => isset($_POST['port']) ? $_POST['port'] : '',
+				'db_type' => isset($_POST['db_type']) ? $_POST['db_type'] : '',
+				'db_username' => isset($_POST['db_username']) ? $_POST['db_username'] : '',
+				'db_password' => isset($_POST['db_password']) ? $_POST['db_password'] : '',
+				'is_public' => !empty($_POST['is_public']),
+				'ssh_host' => isset($_POST['ssh_host']) ? $_POST['ssh_host'] : '',
+				'ssh_port' => isset($_POST['ssh_port']) ? $_POST['ssh_port'] : '',
+				'ssh_user' => isset($_POST['ssh_user']) ? $_POST['ssh_user'] : '',
+				'ssh_password' => isset($_POST['ssh_password']) ? $_POST['ssh_password'] : '',
+				'ssh_private_key_path' => isset($_POST['ssh_private_key_path']) ? $_POST['ssh_private_key_path'] : '',
+			];
+			$errors = $this->adminManager->validateServer($data);
+			if (empty($errors)) {
+				$this->adminManager->createServer($data);
+				redirect(\ME . 'login-system-admin&page=servers', 'Server created.');
+			}
+			$this->adminErrors = $errors;
+			return;
+		}
+
+		if ($action === 'update') {
+			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+			if (!$id) {
+				redirect(\ME . 'login-system-admin&page=servers', 'Invalid server ID.');
+			}
+			$data = [
+				'name' => isset($_POST['name']) ? $_POST['name'] : '',
+				'hostname' => isset($_POST['hostname']) ? $_POST['hostname'] : '',
+				'port' => isset($_POST['port']) ? $_POST['port'] : '',
+				'db_type' => isset($_POST['db_type']) ? $_POST['db_type'] : '',
+				'db_username' => isset($_POST['db_username']) ? $_POST['db_username'] : '',
+				'db_password' => isset($_POST['db_password']) ? $_POST['db_password'] : '',
+				'is_public' => !empty($_POST['is_public']),
+				'ssh_host' => isset($_POST['ssh_host']) ? $_POST['ssh_host'] : '',
+				'ssh_port' => isset($_POST['ssh_port']) ? $_POST['ssh_port'] : '',
+				'ssh_user' => isset($_POST['ssh_user']) ? $_POST['ssh_user'] : '',
+				'ssh_password' => isset($_POST['ssh_password']) ? $_POST['ssh_password'] : '',
+				'ssh_private_key_path' => isset($_POST['ssh_private_key_path']) ? $_POST['ssh_private_key_path'] : '',
+			];
+			$errors = $this->adminManager->validateServer($data);
+			if (empty($errors)) {
+				$this->adminManager->updateServer($id, $data);
+				redirect(\ME . 'login-system-admin&page=servers', 'Server updated.');
+			}
+			$this->adminErrors = $errors;
+			return;
+		}
+
+		if ($action === 'delete') {
+			$id = isset($_POST['id']) ? (int) $_POST['id'] : 0;
+			if (!$id) {
+				redirect(\ME . 'login-system-admin&page=servers', 'Invalid server ID.');
+			}
+			$this->adminManager->deleteServer($id);
+			redirect(\ME . 'login-system-admin&page=servers', 'Server deleted.');
+		}
+	}
+
+	/**
+	 * @return void
+	 */
+	private function handleAdminAccessPost(): void
+	{
+		$assignments = isset($_POST['access']) && is_array($_POST['access']) ? $_POST['access'] : [];
+
+		// Build map: user_id => [server_ids]
+		$userServers = [];
+		foreach ($assignments as $key => $val) {
+			$parts = explode('_', $key);
+			if (count($parts) === 2) {
+				$userId = (int) $parts[0];
+				$serverId = (int) $parts[1];
+				if (!isset($userServers[$userId])) {
+					$userServers[$userId] = [];
+				}
+				$userServers[$userId][] = $serverId;
+			}
+		}
+
+		// Get all users and servers to rebuild full matrix
+		$users = $this->adminManager->listUsers();
+		$servers = $this->adminManager->listServers();
+
+		foreach ($users as $user) {
+			$uid = (int) $user['id'];
+			$selectedIds = isset($userServers[$uid]) ? $userServers[$uid] : [];
+			$this->adminManager->setUserServers($uid, $selectedIds);
+		}
+
+		redirect(\ME . 'login-system-admin&page=access', 'Access permissions updated.');
+	}
+
+	// ---------------------------------------------------------------
+	// Admin UI: rendering
+	// ---------------------------------------------------------------
+
+	/**
+	 * @param string $page
+	 * @return never
+	 */
+	private function renderAdminDashboardPage(): void
+	{
+		$userCount = count($this->adminManager->listUsers());
+		$serverCount = count($this->adminManager->listServers());
+		$accessCount = count($this->database->query('SELECT COUNT(*) AS cnt FROM user_servers')->fetchArray(SQLITE3_ASSOC) ?: []);
+
+		echo '<h2>Admin Dashboard</h2>';
+		echo '<p>Welcome to the Adminer Login System administration panel.</p>';
+		echo '<div id="admin-stats" style="display:flex;gap:1em;margin:1em 0;">';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($userCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=users">Users</a></div>';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($serverCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=servers">Servers</a></div>';
+		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($accessCount) . '</strong><br><a href="' . h(\ME) . 'login-system-admin&page=access">Access mappings</a></div>';
+		echo '</div>';
+
+		echo '<h3>Quick links</h3>';
+		echo '<ul>';
+		echo '<li><a href="' . h(\ME) . 'login-system-admin&page=user_form">Add new user</a></li>';
+		echo '<li><a href="' . h(\ME) . 'login-system-admin&page=server_form">Add new server</a></li>';
+		echo '</ul>';
+	}
+
+	/**
+	 * @return void
+	 */
+	private function renderAdminUsersPage(): void
+	{
+		$users = $this->adminManager->listUsers();
+		$currentUserId = isset($_SESSION["adminer_login_system_user_id"]) ? (int) $_SESSION["adminer_login_system_user_id"] : 0;
+
+		echo '<h2>Users</h2>';
+		echo '<p><a href="' . h(\ME) . 'login-system-admin&page=user_form" class="button">+ Add User</a></p>';
+
+		if (empty($users)) {
+			echo '<p>No users found.</p>';
+			return;
+		}
+
+		echo '<table cellspacing="0">';
+		echo '<thead><tr><th>Username</th><th>Role</th><th>TOTP</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+
+		foreach ($users as $user) {
+			$isSelf = (int) $user['id'] === $currentUserId;
+			$totpStatus = (!empty($user['totp_secret']) && !empty($user['enrolled_at'])) ? 'Yes' : 'No';
+			$editLink = h(\ME) . 'login-system-admin&page=user_form&id=' . $user['id'];
+			echo '<tr>';
+			echo '<td>' . h($user['username']) . ($isSelf ? ' <em>(you)</em>' : '') . '</td>';
+			echo '<td>' . h($user['role']) . '</td>';
+			echo '<td>' . $totpStatus . '</td>';
+			echo '<td>' . ($user['created_at'] ? h(date('Y-m-d', (int) $user['created_at'])) : '') . '</td>';
+			echo '<td>';
+			echo '<form action="' . h(\ME) . 'login-system-admin&page=users" method="post" style="display:inline">';
+			echo input_token();
+			echo '<input type="hidden" name="id" value="' . $user['id'] . '">';
+			echo '<a href="' . $editLink . '">Edit</a>';
+			echo ' | ';
+			echo '<input type="hidden" name="admin_action" value="delete">';
+			echo '<input type="submit" value="Delete" onclick="return confirm(\'Are you sure you want to delete user ' . h($user['username']) . '?\')">';
+			echo '</form>';
+			echo '</td>';
+			echo '</tr>';
+		}
+
+		echo '</tbody></table>';
+	}
+
+	/**
+	 * @param int|null $id
+	 * @param array $errors
+	 * @return void
+	 */
+	private function renderAdminUserForm(?int $id = null, array $errors = []): void
+	{
+		$isEdit = $id !== null;
+		$user = $isEdit ? $this->adminManager->getUser($id) : null;
+		$action = $isEdit ? 'update' : 'create';
+		$title = $isEdit ? 'Edit user: ' . h($user['username'] ?? '') : 'Add user';
+
+		echo '<h2>' . $title . '</h2>';
+
+		$allErrors = !empty($errors) ? $errors : $this->adminErrors;
+		if (!empty($allErrors)) {
+			foreach ($allErrors as $error) {
+				echo '<p class="error">' . h($error) . '</p>';
+			}
+		}
+
+		$formPage = $isEdit ? 'user_form&id=' . $id : 'user_form';
+		echo '<form action="' . h(\ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
+		echo input_token();
+		echo '<input type="hidden" name="admin_action" value="' . $action . '">';
+		if ($isEdit) {
+			echo '<input type="hidden" name="id" value="' . $id . '">';
+		}
+
+		echo '<table cellspacing="0" class="layout">';
+		echo '<tr><th>Username<td><input name="username" value="' . h($user['username'] ?? '') . '" required maxlength="255">';
+		echo '<tr><th>Password<td><input name="password" type="password"' . ($isEdit ? ' placeholder="Leave blank to keep current"' : ' required') . '>';
+		if ($isEdit) {
+			echo '<br><small>Leave blank to keep current password.</small>';
+		}
+		echo '<tr><th>Role<td><select name="role">';
+		echo '<option value="user"' . (($user['role'] ?? '') === 'user' ? ' selected' : '') . '>User</option>';
+		echo '<option value="admin"' . (($user['role'] ?? '') === 'admin' ? ' selected' : '') . '>Admin</option>';
+		echo '</select>';
+		echo '</table>';
+		echo '<p><input type="submit" value="' . ($isEdit ? 'Save' : 'Create') . '">';
+		echo ' <a href="' . h(\ME) . 'login-system-admin&page=users">Cancel</a></p>';
+		echo '</form>';
+	}
+
+	/**
+	 * @return void
+	 */
+	private function renderAdminServersPage(): void
+	{
+		$servers = $this->adminManager->listServers();
+
+		echo '<h2>Servers</h2>';
+		echo '<p><a href="' . h(\ME) . 'login-system-admin&page=server_form" class="button">+ Add Server</a></p>';
+
+		if (empty($servers)) {
+			echo '<p>No servers found.</p>';
+			return;
+		}
+
+		echo '<table cellspacing="0">';
+		echo '<thead><tr><th>Name</th><th>Type</th><th>Host</th><th>Port</th><th>Public</th><th>SSH</th><th>Actions</th></tr></thead><tbody>';
+
+		foreach ($servers as $server) {
+			$public = !empty($server['is_public']) ? 'Yes' : 'No';
+			$ssh = (!empty($server['ssh_host'])) ? 'Yes' : 'No';
+			$editLink = h(\ME) . 'login-system-admin&page=server_form&id=' . $server['id'];
+			echo '<tr>';
+			echo '<td>' . h($server['name']) . '</td>';
+			echo '<td>' . h($server['db_type']) . '</td>';
+			echo '<td>' . h($server['hostname']) . '</td>';
+			echo '<td>' . h($server['port']) . '</td>';
+			echo '<td>' . $public . '</td>';
+			echo '<td>' . $ssh . '</td>';
+			echo '<td>';
+			echo '<form action="' . h(\ME) . 'login-system-admin&page=servers" method="post" style="display:inline">';
+			echo input_token();
+			echo '<input type="hidden" name="id" value="' . $server['id'] . '">';
+			echo '<a href="' . $editLink . '">Edit</a>';
+			echo ' | ';
+			echo '<input type="hidden" name="admin_action" value="delete">';
+			echo '<input type="submit" value="Delete" onclick="return confirm(\'Are you sure you want to delete server ' . h($server['name']) . '?\')">';
+			echo '</form>';
+			echo '</td>';
+			echo '</tr>';
+		}
+
+		echo '</tbody></table>';
+	}
+
+	/**
+	 * @param int|null $id
+	 * @param array $errors
+	 * @return void
+	 */
+	private function renderAdminServerForm(?int $id = null, array $errors = []): void
+	{
+		$isEdit = $id !== null;
+		$server = $isEdit ? $this->adminManager->getServer($id) : null;
+		$action = $isEdit ? 'update' : 'create';
+		$title = $isEdit ? 'Edit server: ' . h($server['name'] ?? '') : 'Add server';
+
+		echo '<h2>' . $title . '</h2>';
+
+		$allErrors = !empty($errors) ? $errors : $this->adminErrors;
+		if (!empty($allErrors)) {
+			foreach ($allErrors as $error) {
+				echo '<p class="error">' . h($error) . '</p>';
+			}
+		}
+
+		$formPage = $isEdit ? 'server_form&id=' . $id : 'server_form';
+		echo '<form action="' . h(\ME) . 'login-system-admin&page=' . $formPage . '" method="post">';
+		echo input_token();
+		echo '<input type="hidden" name="admin_action" value="' . $action . '">';
+		if ($isEdit) {
+			echo '<input type="hidden" name="id" value="' . $id . '">';
+		}
+
+		echo '<table cellspacing="0" class="layout">';
+		echo '<tr><th>Name<td><input name="name" value="' . h($server['name'] ?? '') . '">';
+		echo '<tr><th>Database type<td><select name="db_type">';
+		$types = ['server' => 'MySQL', 'pgsql' => 'PostgreSQL', 'sqlite' => 'SQLite', 'mssql' => 'MSSQL', 'oracle' => 'Oracle', 'firebird' => 'Firebird', 'mongo' => 'MongoDB', 'elastic' => 'Elasticsearch'];
+		foreach ($types as $val => $label) {
+			$selected = ($server['db_type'] ?? 'server') === $val ? ' selected' : '';
+			echo '<option value="' . $val . '"' . $selected . '>' . h($label) . '</option>';
+		}
+		echo '</select>';
+		echo '<tr><th>Hostname<td><input name="hostname" value="' . h($server['hostname'] ?? '') . '" required>';
+		echo '<tr><th>Port<td><input name="port" value="' . h($server['port'] ?? '') . '" required type="number" min="1" max="65535">';
+		echo '<tr><th>Database username<td><input name="db_username" value="' . h($server['db_username'] ?? '') . '" required>';
+		echo '<tr><th>Database password<td><input name="db_password" type="password"' . ($isEdit ? ' placeholder="Leave blank to keep current"' : ' required') . '>';
+		if ($isEdit) {
+			echo '<br><small>Leave blank to keep current encrypted password.</small>';
+		}
+		echo '<tr><th>Public<td><label><input type="checkbox" name="is_public" value="1"' . (!empty($server['is_public']) ? ' checked' : '') . '> Public (no SSH tunnel)</label>';
+		echo '<tr><th colspan=2><hr><strong>SSH Tunnel</strong> <small>(leave empty if not needed)</small>';
+		echo '<tr><th>SSH host<td><input name="ssh_host" value="' . h($server['ssh_host'] ?? '') . '">';
+		echo '<tr><th>SSH port<td><input name="ssh_port" value="' . h($server['ssh_port'] ?? '22') . '" type="number" min="1" max="65535">';
+		echo '<tr><th>SSH user<td><input name="ssh_user" value="' . h($server['ssh_user'] ?? '') . '">';
+		echo '<tr><th>SSH password<td><input name="ssh_password" type="password" value="' . h($server['ssh_password'] ?? '') . '">';
+		echo '<tr><th>SSH key path<td><input name="ssh_private_key_path" value="' . h($server['ssh_private_key_path'] ?? '') . '">';
+		echo '</table>';
+		echo '<p><input type="submit" value="' . ($isEdit ? 'Save' : 'Create') . '">';
+		echo ' <a href="' . h(\ME) . 'login-system-admin&page=servers">Cancel</a></p>';
+		echo '</form>';
+	}
+
+	/**
+	 * @return void
+	 */
+	private function renderAdminAccessPage(): void
+	{
+		$users = $this->adminManager->listUsers();
+		$servers = $this->adminManager->listServers();
+		$userServers = $this->adminManager->getUserServers();
+
+		echo '<h2>Access Management</h2>';
+		echo '<p>Grant or revoke server access for each user.</p>';
+
+		if (empty($users) || empty($servers)) {
+			echo '<p>Create users and servers first to manage access.</p>';
+			return;
+		}
+
+		echo '<form action="' . h(\ME) . 'login-system-admin&page=access" method="post">';
+		echo input_token();
+
+		echo '<table cellspacing="0">';
+		echo '<thead><tr><th>User</th>';
+		foreach ($servers as $server) {
+			echo '<th>' . h($server['name'] ?: $server['hostname']) . '</th>';
+		}
+		echo '</tr></thead><tbody>';
+
+		foreach ($users as $user) {
+			$uid = (int) $user['id'];
+			$hasAccess = isset($userServers[$uid]) ? $userServers[$uid] : [];
+			echo '<tr>';
+			echo '<td>' . h($user['username']) . '</td>';
+			foreach ($servers as $server) {
+				$sid = (int) $server['id'];
+				$checked = in_array($sid, $hasAccess, true) ? ' checked' : '';
+				echo '<td style="text-align:center"><input type="checkbox" name="access[' . $uid . '_' . $sid . ']" value="1"' . $checked . '></td>';
+			}
+			echo '</tr>';
+		}
+
+		echo '</tbody></table>';
+		echo '<p><input type="submit" value="Save access permissions"></p>';
+		echo '</form>';
+	}
+
+	// ---------------------------------------------------------------
+	// Logout
+	// ---------------------------------------------------------------
 
 	/**
 	 * @return void

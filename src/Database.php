@@ -60,6 +60,7 @@ class Database
 			password_hash TEXT NOT NULL,
 			totp_secret TEXT,
 			enrolled_at INTEGER,
+			role TEXT NOT NULL DEFAULT \'user\',
 			created_at INTEGER NOT NULL DEFAULT (strftime(\'%s\', \'now\'))
 		);');
 
@@ -88,6 +89,20 @@ class Database
 			server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
 			UNIQUE(user_id, server_id)
 		);');
+
+		// Migration: add role column to existing databases
+		$result = $this->db->query('PRAGMA table_info(users)');
+		$hasRole = false;
+		while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+			if ($row['name'] === 'role') {
+				$hasRole = true;
+				break;
+			}
+		}
+		if (!$hasRole) {
+			$this->db->exec('ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT \'user\'');
+			$this->logger->log('Applied schema migration: added role column to users');
+		}
 
 		$this->logger->exit_('Database::createSchema');
 	}

@@ -38,7 +38,7 @@ class Authenticator
 	{
 		$this->logger->entry('Authenticator::authenticate', ['username' => $username]);
 
-		$stmt = $this->database->prepare('SELECT id, username, password_hash, totp_secret FROM users WHERE username = :username');
+		$stmt = $this->database->prepare('SELECT id, username, password_hash, totp_secret, role FROM users WHERE username = :username');
 		$stmt->bindValue(':username', $username, SQLITE3_TEXT);
 		$result = $stmt->execute();
 		$user = $result->fetchArray(SQLITE3_ASSOC);
@@ -70,7 +70,7 @@ class Authenticator
 	{
 		$this->logger->entry('Authenticator::getUserById', ['user_id' => $userId]);
 
-		$stmt = $this->database->prepare('SELECT id, username, password_hash, totp_secret, enrolled_at FROM users WHERE id = :id');
+		$stmt = $this->database->prepare('SELECT id, username, password_hash, totp_secret, enrolled_at, role FROM users WHERE id = :id');
 		$stmt->bindValue(':id', $userId, SQLITE3_INTEGER);
 		$result = $stmt->execute();
 		$user = $result->fetchArray(SQLITE3_ASSOC);
@@ -96,5 +96,37 @@ class Authenticator
 
 		$this->logger->exit_('Authenticator::enrollTotp', ['result' => $result]);
 		return $result;
+	}
+
+	/**
+	 * @return array
+	 */
+	public function listUsers(): array
+	{
+		$this->logger->entry('Authenticator::listUsers');
+
+		$result = $this->database->query('SELECT id, username, role, totp_secret, enrolled_at, created_at FROM users ORDER BY username');
+		$users = [];
+		while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+			$users[] = $row;
+		}
+
+		$this->logger->exit_('Authenticator::listUsers', ['count' => count($users)]);
+		return $users;
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function isLastAdmin(): bool
+	{
+		$this->logger->entry('Authenticator::isLastAdmin');
+
+		$result = $this->database->query("SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin'");
+		$row = $result->fetchArray(SQLITE3_ASSOC);
+		$last = ($row !== false && (int) $row['cnt'] <= 1);
+
+		$this->logger->exit_('Authenticator::isLastAdmin', ['last' => $last]);
+		return $last;
 	}
 }

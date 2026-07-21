@@ -113,6 +113,40 @@ class ServerManager
 	/**
 	 * @return array
 	 */
+	public function listServers(): array
+	{
+		$this->logger->entry('ServerManager::listServers');
+
+		$result = $this->database->query('SELECT * FROM servers ORDER BY name, hostname');
+		$servers = [];
+		while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+			$servers[] = $row;
+		}
+
+		$this->logger->exit_('ServerManager::listServers', ['count' => count($servers)]);
+		return $servers;
+	}
+
+	/**
+	 * @param int $serverId
+	 * @return array|null
+	 */
+	public function getServer(int $serverId): ?array
+	{
+		$this->logger->entry('ServerManager::getServer', ['server_id' => $serverId]);
+
+		$stmt = $this->database->prepare('SELECT * FROM servers WHERE id = :id');
+		$stmt->bindValue(':id', $serverId, SQLITE3_INTEGER);
+		$result = $stmt->execute();
+		$server = $result->fetchArray(SQLITE3_ASSOC);
+
+		$this->logger->exit_('ServerManager::getServer', ['found' => $server !== false]);
+		return $server ?: null;
+	}
+
+	/**
+	 * @return array
+	 */
 	public function listActiveTunnels(): array
 	{
 		$this->logger->entry('ServerManager::listActiveTunnels');

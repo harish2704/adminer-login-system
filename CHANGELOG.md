@@ -4,6 +4,25 @@
 
 - Initial public release.
 
+## 0.2.0 — 2026-07-15
+
+### Added
+
+- **Super admin role**: `role` column on `users` table (`'admin'` or `'user'`), stored in session on login.
+- **Admin UI**: management interface for super admins (visible via "Admin" nav link), with pages for users, servers, and access management.
+- **User CRUD**: list, add, edit, and delete vault users with username, password (bcrypt), and role selection.
+- **Server CRUD**: list, add, edit, and delete database server entries with full SSH tunnel configuration. Database passwords are AES-256-CBC encrypted at rest.
+- **Access matrix**: checkbox grid (users × servers) to grant or revoke server access, saved in one submission.
+- **Admin dashboard**: overview page with counts of users, servers, and access mappings.
+- **Last admin protection**: prevents deleting the last admin user; also prevents admins from deleting their own account.
+- **Tunnel cleanup**: active SSH tunnels are killed before a server is deleted.
+- **`menuActions()` hook**: "Admin" navigation link only visible to super admins.
+- **`bin/seed.php --no-admin`**: flag to create non-admin users via CLI.
+
+### Fixed
+
+- **No web UI for vault management** — resolved with the new admin interface.
+
 ## 0.1.0 — 2026-07-15
 
 ### Added

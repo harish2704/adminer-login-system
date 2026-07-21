@@ -7,15 +7,18 @@ $dbFile = $argv[1] ?? __DIR__ . '/../login-vault.db';
 $masterKey = $argv[2] ?? null;
 
 if ($masterKey === null) {
-	fwrite(STDERR, "Usage: php bin/seed.php [db-file] [master-key]\n");
+	fwrite(STDERR, "Usage: php bin/seed.php [db-file] [master-key] [--no-admin]\n");
 	exit(1);
 }
+
+$isAdmin = !in_array('--no-admin', $argv, true);
 
 $logger = new Logger(false, __DIR__ . '/../login-system.log');
 $database = new Database($dbFile, $logger);
 
-$username = readline('Admin username: ');
-$password = readline('Admin password: ');
+$username = readline('Username: ');
+$password = readline('Password: ');
+$role = $isAdmin ? 'admin' : 'user';
 
 if ($username === '' || $password === '') {
 	fwrite(STDERR, "Username and password are required.\n");
@@ -32,9 +35,10 @@ if ($result->fetchArray(SQLITE3_ASSOC)) {
 }
 
 $hash = password_hash($password, PASSWORD_BCRYPT);
-$stmt = $database->prepare('INSERT INTO users (username, password_hash, created_at) VALUES (:username, :hash, :created_at)');
+$stmt = $database->prepare('INSERT INTO users (username, password_hash, role, created_at) VALUES (:username, :hash, :role, :created_at)');
 $stmt->bindValue(':username', $username, SQLITE3_TEXT);
 $stmt->bindValue(':hash', $hash, SQLITE3_TEXT);
+$stmt->bindValue(':role', $role, SQLITE3_TEXT);
 $stmt->bindValue(':created_at', time(), SQLITE3_INTEGER);
 
 if ($stmt->execute() === false) {
@@ -42,4 +46,4 @@ if ($stmt->execute() === false) {
 	exit(1);
 }
 
-echo "Created admin user: $username\n";
+echo "Created $role user: $username\n";
