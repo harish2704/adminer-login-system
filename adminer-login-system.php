@@ -251,6 +251,11 @@ class AdminerLoginSystem extends Plugin
 				exit;
 			}
 
+			// Handle POST before any output (allows redirect headers)
+			if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+				$this->handleAdminPost($page);
+			}
+
 			$pageTitle = 'Admin: ' . ucfirst(str_replace('_', ' ', $page));
 			?>
 <!DOCTYPE html>
@@ -266,10 +271,6 @@ class AdminerLoginSystem extends Plugin
 <p class="links"><a href="<?php echo h(substr(ME, 0, -1)); ?>">« Back to Adminer</a></p>
 <h2><?php echo h($pageTitle); ?></h2>
 <?php
-			if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-				$this->handleAdminPost($page);
-			}
-
 			$this->renderAdminPage($page);
 ?>
 </div>
