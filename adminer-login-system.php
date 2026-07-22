@@ -428,8 +428,8 @@ class AdminerLoginSystem extends Plugin
 		echo '<p><input type="submit" value="Verify and enable"></p>';
 		echo '</form>';
 		echo '<p>Manual secret: <code>' . h($secret) . '</code></p>';
-		echo '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>';
-		echo '<script>new QRCode(document.getElementById("qrcode"), { text: ' . json_encode($otpauth) . ', width: 200, height: 200 });</script>';
+		echo script_src('/externals/adminer-login-system/qrcode.min.js');
+		echo script('new QRCode(document.getElementById("qrcode"), { text: ' . json_encode($otpauth) . ', width: 200, height: 200 });');
 
 		$this->logger->exit_('AdminerLoginSystem::renderEnrollTotp');
 	}
