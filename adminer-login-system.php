@@ -461,18 +461,21 @@ class AdminerLoginSystem extends Plugin
 		if (empty($servers)) {
 			echo '<p>No servers are available for your account.</p>';
 		} else {
+			$isAdmin = $this->isSuperAdmin();
 			echo '<form action="" method="post">';
 			echo input_token();
 			echo '<table cellspacing="0">';
-			echo '<thead><tr><th></th><th>Name</th><th>Type</th><th>Host</th><th>Port</th></tr></thead><tbody>';
+			echo '<thead><tr><th></th><th>Name</th>' . ($isAdmin ? '<th>Type</th><th>Host</th><th>Port</th>' : '') . '</tr></thead><tbody>';
 
 			foreach ($servers as $server) {
 				echo '<tr>';
 				echo '<td><input type="radio" name="server_id" value="' . h($server['id']) . '" required></td>';
 				echo '<td>' . h($server['name']) . '</td>';
-				echo '<td>' . h($server['db_type']) . '</td>';
-				echo '<td>' . h($server['hostname']) . '</td>';
-				echo '<td>' . h($server['port']) . '</td>';
+				if ($isAdmin) {
+					echo '<td>' . h($server['db_type']) . '</td>';
+					echo '<td>' . h($server['hostname']) . '</td>';
+					echo '<td>' . h($server['port']) . '</td>';
+				}
 				echo '</tr>';
 			}
 
@@ -780,7 +783,6 @@ class AdminerLoginSystem extends Plugin
 		$serverCount = count($this->adminManager->listServers());
 		$accessCount = count($this->database->query('SELECT COUNT(*) AS cnt FROM user_servers')->fetchArray(SQLITE3_ASSOC) ?: []);
 
-		echo '<h2>Admin Dashboard</h2>';
 		echo '<p>Welcome to the Adminer Login System administration panel.</p>';
 		echo '<div id="admin-stats" style="display:flex;gap:1em;margin:1em 0;">';
 		echo '<div style="flex:1;padding:1em;border:1px solid #ccc;border-radius:4px;text-align:center;"><strong>' . h($userCount) . '</strong><br><a href="' . h(ME) . 'login-system-admin&page=users">Users</a></div>';
